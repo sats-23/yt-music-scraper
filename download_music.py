@@ -1,45 +1,72 @@
 import csv
-import subprocess
-import shlex
+import os
+import yt_dlp
+from concurrent.futures import ThreadPoolExecutor
 
-CSV_FILE = "results.csv"
-YT_DL_CMD = "./yt_dl -x --audio-format mp3 --audio-quality 0 --embed-metadata -o '~/Music/%(title)s.%(ext)s'"
+# Configuration
+CSV_FILE = 'results.csv'
+DOWNLOAD_DIR = 'Music'
+MAX_PARALLEL_DOWNLOADS = 5 
 
-def main():
-    urls = []
+if not os.path.exists(DOWNLOAD_DIR):
+    os.makedirs(DOWNLOAD_DIR)
 
-    # Read URLs from CSV
-    with open(CSV_FILE, "r", encoding="utf-8") as f:
+def download_song(row):
+    song_name = row.get('Song', 'Unknown_Song')
+    url_blob = row.get('YouTube URL', '')
+    
+    if not url_blob:
+        return f"[SKIPPED] No URL for {song_name}"
+
+    urls = url_blob.strip().split('\n')
+    if len(urls) < 2:
+        target_url = urls[0].strip()
+    else:
+        target_url = urls[1].strip()
+
+    # Clean filename (removes : / \ etc)
+    clean_name = "".join([c for c in song_name if c.isalnum() or c in (' ', '-', '_')]).strip()
+    
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': f'{DOWNLOAD_DIR}/{clean_name}.%(ext)s',
+        'noplaylist': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        # Forces FFmpeg to ignore missing metadata/headers in the stream
+        'postprocessor_args': [
+            '-err_detect', 'ignore_err'
+        ],
+        'quiet': True,
+        'no_warnings': True,
+    }
+
+    try:
+        print(f"[STARTING] {song_name}\n")
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([target_url])
+        return f"[FINISHED] {song_name}\n"
+    except Exception as e:
+        return f"[ERROR] {song_name}: {str(e)}\n"
+
+def run_parallel():
+    songs_to_download = []
+    
+    with open(CSV_FILE, mode='r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
-        for row in reader:
-            url = row.get("YouTube URL")
-            if url:
-                urls.append(url.strip())
+        songs_to_download = list(reader)
 
-    print(f"Found {len(urls)} URLs to download.")
-    print("----------------------------------")
+    print(f"Found {len(songs_to_download)} tracks. Downloading audio streams...\n")
 
-    # Loop through and run yt_dl
-    for i, url in enumerate(urls, start=1):
-        print(f"[{i}/{len(urls)}] Downloading: {url}")
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS) as executor:
+        results = list(executor.map(download_song, songs_to_download))
 
-        cmd = f"{YT_DL_CMD} {url}"
-
-        # Use subprocess to run the command
-        process = subprocess.Popen(
-            shlex.split(cmd),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-        stdout, stderr = process.communicate()
-
-        if process.returncode == 0:
-            print("✓ Downloaded successfully\n")
-        else:
-            print("✗ Failed download\n")
-            print(stderr.decode())
-
-    print("All downloads finished.")
+    print("\n--- Process Complete ---")
+    for res in results:
+        print(res)
 
 if __name__ == "__main__":
-    main()
+    run_parallel()

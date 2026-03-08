@@ -1,26 +1,18 @@
 import requests
 import csv
-
-API_KEY = "YOUR_YOUTUBE_API_KEY"
-SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
+import subprocess
+import concurrent.futures
 
 INPUT_FILE = "songs.txt"
 OUTPUT_FILE = "results.csv"
 
 
 def youtube_search(query):
-    params = {
-        "part": "snippet",
-        "q": query,
-        "maxResults": 1,
-        "type": "video",
-        "key": API_KEY
-    }
-    response = requests.get(SEARCH_URL, params=params).json()
-
-    if "items" in response and response["items"]:
-        vid = response["items"][0]["id"]["videoId"]
-        return f"https://www.youtube.com/watch?v={vid}"
+    # Use yt-dlp to search and get URL
+    result = subprocess.run(["./yt_dlp", f"ytsearch:{query}", "--get-url"], 
+                          capture_output=True, text=True, cwd=".")
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
     return None
 
 
@@ -32,10 +24,22 @@ def main():
 
     results = []
 
-    for s in songs:
-        url = youtube_search(s)
-        print(s, "->", url)
-        results.append([s, url])
+    print("Searching for URLs in parallel...\n")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_song = {executor.submit(youtube_search, song): song for song in songs}
+        for future in concurrent.futures.as_completed(future_to_song):
+            song = future_to_song[future]
+            try:
+                url = future.result()
+                print(song, "->", url)
+                results.append([song, url])
+            except Exception as exc:
+                print(f'{song} generated an exception: {exc}')
+                results.append([song, None])
+
+    # Sort results to maintain order
+    results.sort(key=lambda x: songs.index(x[0]))
 
     print("\nSaving to CSV...")
     with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as f:
