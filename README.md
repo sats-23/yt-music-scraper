@@ -55,7 +55,7 @@ The pipeline runs three stages in order:
 Search  →  Download  →  Rename
 ```
 
-1. **Search** — looks up each song on YouTube in parallel and finds the best matching video URL.
+1. **Search** — looks up each song on YouTube in parallel, fetches the top 8 results, and picks the one best suited for listening (prefers "- Topic" channels, "Official Audio" and "Lyrics" uploads; avoids music videos, live versions, covers, remixes, and wrong-artist matches).
 2. **Download** — uses `yt-dlp` + `ffmpeg` to download the audio and convert it to MP3.
 3. **Rename** — reads the ID3 tags written by `yt-dlp` and renames each file to `Artist - Title.mp3`.
 
