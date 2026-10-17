@@ -1,16 +1,25 @@
-import requests
 import csv
 import subprocess
 import concurrent.futures
+import os
 
-INPUT_FILE = "songs.txt"
-OUTPUT_FILE = "results.csv"
+# Paths are relative to the project root (cwd is always set to root by server.py,
+# and __file__-based ROOT is used when the script is run standalone).
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+INPUT_FILE = os.path.join(ROOT, "songs.txt")
+OUTPUT_FILE = os.path.join(ROOT, "results.csv")
+YT_DLP = os.path.join(ROOT, "yt-dlp")
 
 
 def youtube_search(query):
-    # Use yt-dlp to search and get URL
-    result = subprocess.run(["./yt_dlp", f"ytsearch:{query}", "--get-url"], 
-                          capture_output=True, text=True, cwd=".")
+    # Use the local yt-dlp binary from the project root
+    result = subprocess.run(
+        [YT_DLP, f"ytsearch:{query}", "--get-url"],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+    )
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     return None
@@ -35,10 +44,10 @@ def main():
                 print(song, "->", url)
                 results.append([song, url])
             except Exception as exc:
-                print(f'{song} generated an exception: {exc}')
+                print(f"{song} generated an exception: {exc}")
                 results.append([song, None])
 
-    # Sort results to maintain order
+    # Sort results to maintain original order
     results.sort(key=lambda x: songs.index(x[0]))
 
     print("\nSaving to CSV...")

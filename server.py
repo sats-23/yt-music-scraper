@@ -2,12 +2,22 @@
 """
 Local web UI for the YouTube music pipeline.
 
-Put this file and index.html next to your scripts, then run:
+Run from the project root:
     python3 server.py
 and open http://localhost:8000
 
-Stages:  save songs.txt -> yt_search.py -> download_music.py -> rename_syntax.py
-The original scripts are not modified; they run as subprocesses.
+Directory layout:
+    server.py          this file
+    index.html         web UI
+    yt-dlp             yt-dlp binary
+    scripts/           pipeline scripts
+      yt_search.py
+      download_music.py
+      rename_syntax.py
+      init_files.py    first-time setup helper
+
+Stages:  save songs.txt -> scripts/yt_search.py -> scripts/download_music.py -> scripts/rename_syntax.py
+The scripts are not modified; they run as subprocesses with cwd set to the project root.
 """
 import csv
 import json
@@ -23,7 +33,11 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE)
 PORT = int(os.environ.get("PORT", 8000))
 MUSIC = os.path.join(BASE, "Music")  # download_music.py writes to ./Music
-SCRIPTS = ["yt_search.py", "download_music.py", "rename_syntax.py"]
+SCRIPTS = [
+    os.path.join("scripts", "yt_search.py"),
+    os.path.join("scripts", "download_music.py"),
+    os.path.join("scripts", "rename_syntax.py"),
+]
 LOCK = threading.RLock()
 
 STAGES = [
@@ -150,8 +164,8 @@ def pipeline(songs):
                             st[1]["done"] += 1
                             break
 
-        if run_script("yt_search.py", on_search) != 0 and not CANCEL:
-            raise Fail("yt_search.py exited with an error. Check the log and that ./yt_dlp is executable.")
+        if run_script(os.path.join("scripts", "yt_search.py"), on_search) != 0 and not CANCEL:
+            raise Fail("scripts/yt_search.py exited with an error. Check the log and that ./yt-dlp is executable.")
         if CANCEL:
             return
 
@@ -183,7 +197,7 @@ def pipeline(songs):
             if line.startswith("[STARTING] "):
                 STARTING.add(line[len("[STARTING] "):].strip())
 
-        rc = run_script("download_music.py", on_dl)
+        rc = run_script(os.path.join("scripts", "download_music.py"), on_dl)
         if CANCEL:
             return
         n = compute_downloads(final=True)
@@ -202,8 +216,8 @@ def pipeline(songs):
                 with LOCK:
                     st[3]["done"] += 1
 
-        if run_script("rename_syntax.py", on_rename, stdin_text=MUSIC + "\n") != 0 and not CANCEL:
-            raise Fail("rename_syntax.py exited with an error.")
+        if run_script(os.path.join("scripts", "rename_syntax.py"), on_rename, stdin_text=MUSIC + "\n") != 0 and not CANCEL:
+            raise Fail("scripts/rename_syntax.py exited with an error.")
         if CANCEL:
             return
         st[3].update(status="done", done=len(mp3s))
@@ -281,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"error": "A run is already in progress."}, 409)
             missing = [s for s in SCRIPTS if not os.path.exists(os.path.join(BASE, s))]
             if missing:
-                return self.send_json({"error": "Missing next to server.py: " + ", ".join(missing)}, 400)
+                return self.send_json({"error": "Missing scripts: " + ", ".join(missing)}, 400)
             songs = [l.strip() for l in str(data.get("songs", "")).splitlines() if l.strip()]
             if not songs:
                 return self.send_json({"error": "Add at least one song name."}, 400)
