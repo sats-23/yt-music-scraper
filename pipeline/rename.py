@@ -52,8 +52,20 @@ def sanitize_filename_part(s: str) -> str:
     s = re.sub(r"\s+", " ", s).strip()
     return s
 
-def rename_music_files(directory):
+def rename_music_files(directory, on_result=None):
+    """Rename every .mp3 in `directory` to 'Song - Artist.mp3' using its ID3 tags.
+
+    Returns [(old_name, status, detail), ...] where status is one of
+    'renamed', 'unchanged', 'skipped', 'error'.
+    `on_result(old_name, status, detail)` is called per file.
+    """
     directory = os.path.expanduser(directory)
+    results = []
+
+    def report(file, status, detail=""):
+        results.append((file, status, detail))
+        if on_result:
+            on_result(file, status, detail)
 
     for file in os.listdir(directory):
         if not file.lower().endswith(".mp3"):
@@ -64,14 +76,14 @@ def rename_music_files(directory):
         try:
             tags = EasyID3(file_path)
         except Exception:
-            print(f"⚠️  Skipped (no ID3): {file}")
+            report(file, "skipped", "no ID3 tags")
             continue
 
         title = tags.get("title", [None])[0]
         artist = tags.get("artist", [None])[0]
 
         if not title or not artist:
-            print(f"⚠️ Missing metadata (title/artist): {file}")
+            report(file, "skipped", "missing title/artist")
             continue
 
         # Get clean song name from title
@@ -85,16 +97,13 @@ def rename_music_files(directory):
         new_path = os.path.join(directory, new_name)
 
         if new_path == file_path:
+            report(file, "unchanged")
             continue
 
         try:
             os.rename(file_path, new_path)
-            print(f"✔️ {file} → {new_name}")
+            report(file, "renamed", new_name)
         except Exception as e:
-            print(f"❌ Error renaming {file}: {e}")
+            report(file, "error", str(e))
 
-
-if __name__ == "__main__":
-    folder = input("Enter music directory path: ")
-    rename_music_files(folder)
-    print("\n🎵 Done!")
+    return results

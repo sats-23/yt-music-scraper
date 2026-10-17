@@ -10,21 +10,16 @@ Directory layout:
     server.py          this file
     index.html         web UI
     yt-dlp             yt-dlp binary
-    scripts/           pipeline scripts
-      yt_search.py
-      download_music.py
-      rename_syntax.py
-      init_files.py    first-time setup helper
+    pipeline/          pipeline stages (imported, not spawned)
+      search.py        search_all(songs)        -> [(song, url)]
+      download.py      download_all(rows)       -> [(song, ok, msg)]
+      rename.py        rename_music_files(dir)  -> [(file, status, detail)]
 
-Stages:  save songs.txt -> scripts/yt_search.py -> scripts/download_music.py -> scripts/rename_syntax.py
-The scripts are not modified; they run as subprocesses with cwd set to the project root.
+Stages:  search -> download -> rename
+Data flows between stages as Python objects; nothing is written to disk except the MP3s.
 """
-import csv
-import importlib.util
 import json
 import os
-import subprocess
-import sys
 import threading
 import time
 import webbrowser
@@ -33,27 +28,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 BASE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE)
 
-# Bootstrap: create songs.txt, results.csv, Music/ if they don't exist yet.
-_spec = importlib.util.spec_from_file_location(
-    "init_files", os.path.join(BASE, "scripts", "init_files.py")
-)
-_init = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_init)
-_init.ensure(verbose=True)
+from pipeline import download_all, rename_music_files, search_all  # noqa: E402
+from pipeline.common import MUSIC_DIR as MUSIC  # noqa: E402
+
 PORT = int(os.environ.get("PORT", 8000))
-MUSIC = os.path.join(BASE, "Music")  # download_music.py writes to ./Music
-SCRIPTS = [
-    os.path.join("scripts", "yt_search.py"),
-    os.path.join("scripts", "download_music.py"),
-    os.path.join("scripts", "rename_syntax.py"),
-]
 LOCK = threading.RLock()
 
 STAGES = [
-    ("save", "Save songs", "Writing your list to songs.txt"),
-    ("search", "Find on YouTube", "yt_search.py is looking up a video for each song"),
-    ("download", "Download audio", "download_music.py is fetching and converting tracks to MP3"),
-    ("rename", "Clean up names", "rename_syntax.py is tidying filenames from the ID3 tags"),
+    ("search", "Find on YouTube", "Looking up a video for each song"),
+    ("download", "Download audio", "Fetching and converting tracks to MP3"),
+    ("rename", "Clean up names", "Tidying filenames from the ID3 tags"),
 ]
 
 
@@ -75,19 +59,11 @@ def fresh():
 
 
 S = fresh()
-PROC = None
-CANCEL = False
-DL_START = 0.0
-STARTING = set()
+CANCEL = threading.Event()
 
 
 class Fail(Exception):
     pass
-
-
-def clean_name(song):
-    # Same rule download_music.py uses for its output filenames
-    return "".join(c for c in song if c.isalnum() or c in (" ", "-", "_")).strip()
 
 
 def log(stage, line):
@@ -96,140 +72,81 @@ def log(stage, line):
         del S["logs"][:-400]
 
 
-def run_script(script, on_line, stdin_text=None):
-    global PROC
-    env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
-    p = subprocess.Popen(
-        [sys.executable, "-u", script],
-        cwd=BASE,
-        env=env,
-        stdin=subprocess.PIPE if stdin_text else subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        bufsize=1,
-    )
-    PROC = p
-    if stdin_text:
-        p.stdin.write(stdin_text)
-        p.stdin.close()
-    for line in p.stdout:
-        line = line.rstrip()
-        if line:
-            on_line(line)
-    return p.wait()
-
-
-def compute_downloads(final=False):
-    """Derive per-song download status from files appearing in Music/."""
-    with LOCK:
-        done = 0
-        active = []
-        for s in S["songs"]:
-            if not s["found"]:
-                continue
-            path = os.path.join(MUSIC, clean_name(s["name"]) + ".mp3")
-            if os.path.exists(path) and os.path.getmtime(path) >= DL_START:
-                s["download"] = "done"
-                done += 1
-            elif final:
-                s["download"] = "failed"
-            elif s["name"] in STARTING:
-                s["download"] = "running"
-                active.append(s["name"])
-            else:
-                s["download"] = "queued"
-        S["stages"][2]["done"] = done
-        S["active"] = active
-        return done
-
-
 def pipeline(songs):
-    global DL_START
     st = S["stages"]
     cur = 0
     try:
-        # 1. Save
-        st[0]["status"] = "running"
-        with open(os.path.join(BASE, "songs.txt"), "w", encoding="utf-8") as f:
-            f.write("\n".join(songs) + "\n")
-        st[0].update(status="done", done=len(songs), total=len(songs))
-        log("save", f"Saved {len(songs)} songs to songs.txt")
+        # 1. Search
+        st[0].update(status="running", total=len(songs))
 
-        # 2. Search
-        cur = 1
-        st[1].update(status="running", total=len(songs))
-
-        def on_search(line):
-            log("search", line)
-            if " -> " in line:
-                name, _, val = line.rpartition(" -> ")
-                with LOCK:
-                    for s in S["songs"]:
-                        if s["name"] == name and s["search"] == "queued":
-                            s["search"] = "missing" if val.strip() in ("None", "") else "found"
-                            st[1]["done"] += 1
-                            break
-
-        if run_script(os.path.join("scripts", "yt_search.py"), on_search) != 0 and not CANCEL:
-            raise Fail("scripts/yt_search.py exited with an error. Check the log and that ./yt-dlp is executable.")
-        if CANCEL:
-            return
-
-        with LOCK:  # trust results.csv as the final word on what was found
-            try:
-                with open(os.path.join(BASE, "results.csv"), encoding="utf-8") as f:
-                    found = {r["Song"] for r in csv.DictReader(f) if (r.get("YouTube URL") or "").strip()}
+        def on_search(song, url):
+            log("search", f"{song} -> {url}")
+            with LOCK:
                 for s in S["songs"]:
-                    s["found"] = s["name"] in found
-                    s["search"] = "found" if s["found"] else "missing"
-            except OSError:
-                raise Fail("results.csv was not created.")
-            st[1].update(status="done", done=len(songs))
-        targets = [s for s in S["songs"] if s["found"]]
+                    if s["name"] == song and s["search"] == "queued":
+                        s["search"] = "found" if url else "missing"
+                        s["found"] = bool(url)
+                        break
+                st[0]["done"] += 1
+
+        results = search_all(songs, on_result=on_search, cancel=CANCEL)
+        if CANCEL.is_set():
+            return
+        st[0]["status"] = "done"
+
+        targets = [(song, url) for song, url in results if url]
         if not targets:
             raise Fail("No YouTube results were found for any song.")
 
-        # 3. Download
-        cur = 2
-        DL_START = time.time() - 1
-        STARTING.clear()
+        # 2. Download
+        cur = 1
         with LOCK:
-            st[2].update(status="running", total=len(targets))
+            st[1].update(status="running", total=len(targets))
             for s in S["songs"]:
                 s["download"] = "queued" if s["found"] else "skipped"
 
-        def on_dl(line):
-            log("download", line)
-            if line.startswith("[STARTING] "):
-                STARTING.add(line[len("[STARTING] "):].strip())
+        def set_download(song, status):
+            for s in S["songs"]:
+                if s["name"] == song and s["found"] and s["download"] in ("queued", "running"):
+                    s["download"] = status
+                    break
 
-        rc = run_script(os.path.join("scripts", "download_music.py"), on_dl)
-        if CANCEL:
+        def on_start(song):
+            log("download", f"[STARTING] {song}")
+            with LOCK:
+                set_download(song, "running")
+                S["active"].append(song)
+
+        def on_finish(song, ok, msg):
+            log("download", f"[{'FINISHED' if ok else 'ERROR'}] {song}" + ("" if ok else f": {msg}"))
+            with LOCK:
+                set_download(song, "done" if ok else "failed")
+                if song in S["active"]:
+                    S["active"].remove(song)
+                if ok:
+                    st[1]["done"] += 1
+
+        outcome = download_all(targets, on_start=on_start, on_finish=on_finish, cancel=CANCEL)
+        if CANCEL.is_set():
             return
-        n = compute_downloads(final=True)
-        if rc != 0 or n == 0:
+        if not any(ok for _, ok, _ in outcome):
             raise Fail("No tracks were downloaded. See the log for the yt-dlp / ffmpeg error.")
-        st[2]["status"] = "done"
+        st[1]["status"] = "done"
 
-        # 4. Rename (script asks for a directory on stdin)
-        cur = 3
+        # 3. Rename
+        cur = 2
         mp3s = [f for f in os.listdir(MUSIC) if f.lower().endswith(".mp3")]
-        st[3].update(status="running", total=len(mp3s))
+        st[2].update(status="running", total=len(mp3s))
 
-        def on_rename(line):
-            log("rename", line)
-            if line.startswith(("✔", "⚠", "❌")):
-                with LOCK:
-                    st[3]["done"] += 1
+        def on_rename(file, status, detail):
+            log("rename", f"{file} [{status}]" + (f" {detail}" if detail else ""))
+            with LOCK:
+                st[2]["done"] += 1
 
-        if run_script(os.path.join("scripts", "rename_syntax.py"), on_rename, stdin_text=MUSIC + "\n") != 0 and not CANCEL:
-            raise Fail("scripts/rename_syntax.py exited with an error.")
-        if CANCEL:
+        rename_music_files(MUSIC, on_result=on_rename)
+        if CANCEL.is_set():
             return
-        st[3].update(status="done", done=len(mp3s))
+        st[2].update(status="done", done=len(mp3s))
 
         with LOCK:
             S["files"] = sorted(f for f in os.listdir(MUSIC) if f.lower().endswith(".mp3"))
@@ -242,7 +159,7 @@ def pipeline(songs):
             log(st[cur]["id"], f"ERROR: {e}")
     finally:
         with LOCK:
-            if CANCEL:
+            if CANCEL.is_set():
                 S["state"] = "cancelled"
                 for x in st:
                     if x["status"] == "running":
@@ -253,8 +170,6 @@ def pipeline(songs):
 
 def snapshot():
     with LOCK:
-        if S["stages"][2]["status"] == "running":
-            compute_downloads()
         end = S["ended"] or time.time()
         out = dict(S, elapsed=round(end - S["started"], 1) if S["started"] else 0)
         return json.loads(json.dumps(out))
@@ -284,17 +199,11 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif self.path == "/api/status":
             self.send_json(snapshot())
-        elif self.path == "/api/songs":
-            try:
-                with open(os.path.join(BASE, "songs.txt"), encoding="utf-8") as f:
-                    self.send_json({"text": f.read()})
-            except OSError:
-                self.send_json({"text": ""})
         else:
             self.send_error(404)
 
     def do_POST(self):
-        global S, CANCEL
+        global S
         n = int(self.headers.get("Content-Length") or 0)
         data = json.loads(self.rfile.read(n) or b"{}") if n else {}
 
@@ -302,14 +211,11 @@ class Handler(BaseHTTPRequestHandler):
             with LOCK:
                 if S["state"] == "running":
                     return self.send_json({"error": "A run is already in progress."}, 409)
-            missing = [s for s in SCRIPTS if not os.path.exists(os.path.join(BASE, s))]
-            if missing:
-                return self.send_json({"error": "Missing scripts: " + ", ".join(missing)}, 400)
             songs = [l.strip() for l in str(data.get("songs", "")).splitlines() if l.strip()]
             if not songs:
                 return self.send_json({"error": "Add at least one song name."}, 400)
             with LOCK:
-                CANCEL = False
+                CANCEL.clear()
                 S = fresh()
                 S["state"] = "running"
                 S["started"] = time.time()
@@ -320,9 +226,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True})
 
         if self.path == "/api/cancel":
-            CANCEL = True
-            if PROC and PROC.poll() is None:
-                PROC.terminate()
+            CANCEL.set()
             return self.send_json({"ok": True})
 
         if self.path == "/api/reset":

@@ -164,7 +164,7 @@ function render(d){
   if (!built) build(d.stages);
   d.stages.forEach((s,i) => {
     $('#st'+i).className = 'stage ' + s.status;
-    $('#ct'+i).textContent = s.status === 'pending' ? '' : (s.total && s.id !== 'save' ? `${s.done} / ${s.total}` : (s.status === 'done' ? 'Done' : ''));
+    $('#ct'+i).textContent = s.status === 'pending' ? '' : (s.total ? `${s.done} / ${s.total}` : (s.status === 'done' ? 'Done' : ''));
     if (i < d.stages.length-1){
       const l = $('#ln'+i);
       l.firstElementChild.style.width = Math.round(frac(s)*100) + '%';
@@ -196,7 +196,7 @@ function render(d){
   $('#hint').innerHTML = d.state === 'error' ? `<span class="err">${esc(d.error)}</span>` : esc(hint);
 
   // songs table
-  const searching = d.stages[1].status === 'running';
+  const searching = d.stages[0].status === 'running';
   const sig = JSON.stringify([d.songs, searching]);
   if (sig !== lastSongs){
     lastSongs = sig;
@@ -252,7 +252,7 @@ $('#start').onclick = async () => {
 $('#cancel').onclick = async () => { await post('/api/cancel'); poll(); };
 $('#again').onclick = async () => { await post('/api/reset'); built = false; lastSongs = ''; poll(); };
 
-fetch('/api/songs').then(r => r.json()).then(d => { if (!$('#songs').value) $('#songs').value = d.text.trim(); countLines(); });
+countLines();
 poll(); setInterval(poll, 700);
 </script>
 </body>
