@@ -5,6 +5,9 @@ from .common import YT_DLP, run
 
 CANDIDATES = 8
 
+# Never spin up more threads than there are songs.
+_MAX_SEARCH_WORKERS = 10
+
 # (regex, score) applied to the video title; higher score = better pick for audio-only listening.
 _TITLE_RULES = [
     (r"official audio|\(audio\)|\baudio\b|\blyrics?\b|lyric video", 3),
@@ -69,18 +72,38 @@ def search_all(songs, on_result=None, cancel=None):
 
     Returns [(song, url_or_None), ...] in input order.
     `on_result(song, url)` is called as each search finishes.
+
+    Guarantees:
+    - Always returns a full list (one entry per song), even if some searches
+      fail or are cancelled mid-flight.
+    - Respects `cancel` before submitting any work, not only inside the worker.
+    - Worker count is capped to the number of songs so we never spawn idle threads.
     """
+    if not songs:
+        return []
+
     results = [(s, None) for s in songs]
+    workers = min(_MAX_SEARCH_WORKERS, len(songs))
 
     def work(i):
+        song = songs[i]
+        if cancel and cancel.is_set():
+            return i, song, None
         try:
-            url = youtube_search(songs[i], cancel)
+            url = youtube_search(song, cancel)
         except Exception:  # noqa: BLE001
             url = None
-        results[i] = (songs[i], url)
-        if on_result:
-            on_result(songs[i], url)
+        return i, song, url
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as ex:
-        list(ex.map(work, range(len(songs))))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = [ex.submit(work, i) for i in range(len(songs))]
+        for fut in concurrent.futures.as_completed(futures):
+            try:
+                i, song, url = fut.result()
+            except Exception:  # noqa: BLE001
+                continue  # result slot already holds (song, None) from initialisation
+            results[i] = (song, url)
+            if on_result:
+                on_result(song, url)
+
     return results

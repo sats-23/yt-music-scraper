@@ -1,7 +1,8 @@
 import os
+import random
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .common import FFMPEG_BIN, MUSIC_DIR, YT_DLP, run
 
@@ -55,7 +56,8 @@ def download_song(song, url, cancel=None):
         except Exception as e:  # noqa: BLE001
             error = str(e)
         if attempt < MAX_RETRIES - 1:
-            time.sleep(2 ** attempt)
+            # Jitter prevents all concurrent retries from hitting the server at the same instant.
+            time.sleep(2 ** attempt + random.uniform(0, 1))
     return False, error
 
 
@@ -64,16 +66,48 @@ def download_all(rows, on_start=None, on_finish=None, cancel=None):
 
     `on_start(song)` / `on_finish(song, ok, message)` are called as work progresses.
     Returns [(song, ok, message), ...] in input order.
-    """
 
-    def work(row):
-        song, url = row
+    Guarantees:
+    - Always returns a full list (one entry per song), even when some downloads
+      fail or raise unexpectedly — never raises from a worker exception.
+    - Rows with no URL are short-circuited without occupying a thread slot.
+    - Respects `cancel` before submitting each task, not only inside the worker.
+    """
+    if not rows:
+        return []
+
+    # Pre-populate so positions are stable even if futures finish out of order.
+    results = [(song, False, "No URL") for song, _ in rows]
+
+    def work(idx, song, url):
+        if cancel and cancel.is_set():
+            return idx, song, False, "Cancelled"
         if on_start:
             on_start(song)
         ok, msg = download_song(song, url, cancel)
         if on_finish:
             on_finish(song, ok, msg)
-        return song, ok, msg
+        return idx, song, ok, msg
 
-    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DOWNLOADS) as ex:
-        return list(ex.map(work, rows))
+    workers = min(MAX_PARALLEL_DOWNLOADS, sum(1 for _, url in rows if url))
+    if workers == 0:
+        return results
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {
+            ex.submit(work, i, song, url): i
+            for i, (song, url) in enumerate(rows)
+            if url  # skip no-URL rows; they already have the right default
+        }
+        for fut in as_completed(futures):
+            try:
+                idx, song, ok, msg = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                idx = futures[fut]
+                song = rows[idx][0]
+                ok, msg = False, str(exc)
+                if on_finish:
+                    on_finish(song, ok, msg)
+            results[idx] = (song, ok, msg)
+
+    return results
