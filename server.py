@@ -20,6 +20,7 @@ Stages:  save songs.txt -> scripts/yt_search.py -> scripts/download_music.py -> 
 The scripts are not modified; they run as subprocesses with cwd set to the project root.
 """
 import csv
+import importlib.util
 import json
 import os
 import subprocess
@@ -31,6 +32,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 os.chdir(BASE)
+
+# Bootstrap: create songs.txt, results.csv, Music/ if they don't exist yet.
+_spec = importlib.util.spec_from_file_location(
+    "init_files", os.path.join(BASE, "scripts", "init_files.py")
+)
+_init = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_init)
+_init.ensure(verbose=True)
 PORT = int(os.environ.get("PORT", 8000))
 MUSIC = os.path.join(BASE, "Music")  # download_music.py writes to ./Music
 SCRIPTS = [
@@ -171,7 +180,7 @@ def pipeline(songs):
 
         with LOCK:  # trust results.csv as the final word on what was found
             try:
-                with open("results.csv", encoding="utf-8") as f:
+                with open(os.path.join(BASE, "results.csv"), encoding="utf-8") as f:
                     found = {r["Song"] for r in csv.DictReader(f) if (r.get("YouTube URL") or "").strip()}
                 for s in S["songs"]:
                     s["found"] = s["name"] in found
@@ -277,7 +286,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(snapshot())
         elif self.path == "/api/songs":
             try:
-                with open("songs.txt", encoding="utf-8") as f:
+                with open(os.path.join(BASE, "songs.txt"), encoding="utf-8") as f:
                     self.send_json({"text": f.read()})
             except OSError:
                 self.send_json({"text": ""})

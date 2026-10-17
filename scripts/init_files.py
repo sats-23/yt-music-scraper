@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-init_files.py — first-time project setup helper.
+init_files.py — project setup helper.
 
-Run once from the project root before using the pipeline:
+Called automatically by server.py on startup, and can also be run standalone:
     python3 scripts/init_files.py
 
 Creates (if missing):
     songs.txt     — empty song list, one song per line
-    results.csv   — CSV with headers Song,YouTube URL
+    results.csv   — CSV with header Song,YouTube URL
     Music/        — output directory for downloaded MP3s
 """
-import csv
 import os
 
-# Always resolve paths relative to the project root (parent of this script)
+# Always resolve paths relative to the project root (parent of this script).
+# This works correctly both when imported by server.py and when run directly.
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 FILES = {
@@ -23,7 +23,29 @@ FILES = {
 DIRS = ["Music"]
 
 
+def ensure(verbose=False):
+    """Create any missing project files/dirs. Safe to call repeatedly."""
+    created = []
+
+    for name, content in FILES.items():
+        path = os.path.join(ROOT, name)
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content)
+            created.append(name)
+
+    for name in DIRS:
+        path = os.path.join(ROOT, name)
+        if not os.path.isdir(path):
+            os.makedirs(path)
+            created.append(name + "/")
+
+    if verbose and created:
+        print("Initialised:", ", ".join(created))
+
+
 def main():
+    """Standalone entry-point — prints a full report."""
     created = []
     skipped = []
 
@@ -53,7 +75,7 @@ def main():
         for item in skipped:
             print(f"  –  {item}")
 
-    print("\nDone. You can now run:  python3 server.py")
+    print("\nDone.")
 
 
 if __name__ == "__main__":
