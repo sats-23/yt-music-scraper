@@ -134,7 +134,7 @@ const ICON = {
   download:'<path d="M12 4v11m-5-5 5 5 5-5M5 20h14"/>',
   rename:'<path d="M3 12V4h8l10 10-8 8z"/><circle cx="7.5" cy="8.5" r="1.2"/>'
 };
-let built = false, last = null, lastSongs = '';
+let built = false, last = null, lastSongs = '', lastLog = '';
 
 const frac = s => s.status === 'done' ? 1 : (s.total ? s.done / s.total : 0);
 const fmt = t => `${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}`;
@@ -220,10 +220,17 @@ function render(d){
     $('#files').innerHTML = d.files.map(f => `<li>${esc(f.replace(/\.mp3$/i,''))}</li>`).join('');
   }
 
-  // log
-  const pre = $('#log'), stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
-  pre.innerHTML = d.logs.length ? d.logs.map(l => `<b>[${esc(l.stage)}]</b> ${esc(l.line)}`).join('\n') : 'Nothing yet.';
-  if (stick) pre.scrollTop = pre.scrollHeight;
+  // log: only rewrite when content changed and the user isn't selecting text in it
+  const pre = $('#log');
+  const logHtml = d.logs.length ? d.logs.map(l => `<b>[${esc(l.stage)}]</b> ${esc(l.line)}`).join('\n') : 'Nothing yet.';
+  const sel = window.getSelection();
+  const selecting = sel && !sel.isCollapsed && pre.contains(sel.anchorNode);
+  if (logHtml !== lastLog && !selecting){
+    const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
+    pre.innerHTML = logHtml;
+    lastLog = logHtml;
+    if (stick) pre.scrollTop = pre.scrollHeight;
+  }
   if (d.state === 'error') $('#logBox').open = true;
 }
 
