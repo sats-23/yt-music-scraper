@@ -13,15 +13,24 @@ YT_DLP = os.path.join(ROOT, "yt-dlp")
 
 
 def youtube_search(query):
-    # Use the local yt-dlp binary from the project root
+    # Use the local yt-dlp binary from the project root to fetch the standard webpage URL
     result = subprocess.run(
-        [YT_DLP, f"ytsearch:{query}", "--get-url"],
+        [
+            YT_DLP,
+            f"ytsearch1:{query}",
+            "--print", "%(webpage_url)s",
+            "--no-playlist",
+            "--quiet",
+            "--no-warnings",
+        ],
         capture_output=True,
         text=True,
         cwd=ROOT,
     )
     if result.returncode == 0 and result.stdout.strip():
-        return result.stdout.strip()
+        # Get the first URL line
+        urls = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+        return urls[0] if urls else None
     return None
 
 

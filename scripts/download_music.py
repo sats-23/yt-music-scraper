@@ -1,5 +1,6 @@
 import csv
 import os
+import shutil
 import time
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
@@ -18,16 +19,25 @@ MAX_RETRIES = 3
 if not os.path.exists(DOWNLOAD_DIR):
     os.makedirs(DOWNLOAD_DIR)
 
+# Ensure PATH includes standard Homebrew and local binary directories
+env_path = os.environ.get("PATH", "")
+extra_paths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+for p in extra_paths:
+    if p not in env_path.split(os.pathsep):
+        env_path = f"{p}{os.pathsep}{env_path}"
+CUSTOM_ENV = dict(os.environ, PATH=env_path)
+
+FFMPEG_BIN = shutil.which("ffmpeg", path=env_path)
+
 
 def download_song(row):
     song_name = row.get("Song", "Unknown_Song")
     url_blob = row.get("YouTube URL", "")
 
-    if not url_blob:
+    if not url_blob or url_blob.strip().lower() in ("none", ""):
         return f"[SKIPPED] No URL for {song_name}"
 
-    urls = url_blob.strip().split("\n")
-    target_url = urls[1].strip() if len(urls) >= 2 else urls[0].strip()
+    target_url = url_blob.strip().splitlines()[0].strip()
 
     # Clean filename (removes : / \ etc.)
     clean_name = "".join(c for c in song_name if c.isalnum() or c in (" ", "-", "_")).strip()
@@ -42,17 +52,24 @@ def download_song(row):
                 "--extract-audio",
                 "--audio-format", "mp3",
                 "--audio-quality", "192K",
+                "--embed-metadata",
+                "-f", "ba/b",
+                "--extractor-args", "youtube:player_client=android,web",
                 "--output", os.path.join(DOWNLOAD_DIR, clean_name + ".%(ext)s"),
                 "--no-playlist",
-                "--retries", "0",
-                "--user-agent",
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-                "--sleep-interval", "0",
-                "--postprocessor-args", "-err_detect ignore_err",
-                target_url,
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if FFMPEG_BIN:
+                cmd.extend(["--ffmpeg-location", os.path.dirname(FFMPEG_BIN)])
+            cmd.append(target_url)
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                cwd=ROOT,
+                env=CUSTOM_ENV,
+            )
             if result.returncode == 0:
                 return f"[FINISHED] {song_name}\n"
             else:
